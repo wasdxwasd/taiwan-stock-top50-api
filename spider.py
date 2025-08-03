@@ -1,10 +1,17 @@
 import requests
 from io import StringIO
 import pandas as pd
+import urllib3
+
+urllib3.disable_warnings()
 
 def get_twse_data(date):
     url = f'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date}&type=ALLBUT0999&response=csv'
-    response = requests.get(url)
+    try:
+        response = requests.get(url, timeout=10)
+    except requests.exceptions.SSLError:
+        response = requests.get(url, verify=False, timeout=10)
+
     lines = response.text.split('\n')
     valid_lines = [line for line in lines if len(line.split('",')) == 17]
     data_text = "\n".join(valid_lines).replace('=', '')
