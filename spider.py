@@ -25,7 +25,11 @@ def get_twse_data(date):
 
 def get_otc_data(date):
     url = f'https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={date}&type=EW&response=csv&order=8&sort=desc'
-    response = requests.get(url)
+    try:
+        response = requests.get(url, timeout=10)
+    except requests.exceptions.SSLError:
+        response = requests.get(url, verify=False, timeout=10)
+
     lines = response.text.split('\n')
     valid_lines = [line for line in lines if len(line.split(',')) > 10]
     data_text = "\n".join(valid_lines).replace('=', '')
