@@ -20,6 +20,8 @@ def get_twse_data(date):
     df = df.set_index('證券代號')
     df["成交金額"] = pd.to_numeric(df["成交金額"], errors="coerce")
     result = df[["證券名稱", "成交金額", "收盤價"]].copy().reset_index()
+     # 過濾掉股號開頭為"00"的ETF
+    result = result[~result['證券代號'].str.startswith('00')]
     result['市場'] = '上市'
     return result
 
@@ -41,6 +43,8 @@ def get_otc_data(date):
     df = df[df["成交金額(元)"] != 0]
     result = df[["代號", "名稱", "成交金額(元)", "收盤"]].copy()
     result.columns = ["證券代號", "證券名稱", "成交金額", "收盤價"]
+    # 過濾掉股號開頭為"00"的ETF
+    result = result[~result['證券代號'].str.startswith('00')]
     result['市場'] = '上櫃'
     return result
 
