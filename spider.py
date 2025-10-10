@@ -1,216 +1,169 @@
+# -*- coding: utf-8 -*-
+"""
+spider.py — 台股成交值排行榜爬蟲模組（最終優化版 v2）
+版本：2025-10
+功能：
+1. 以「每月交易日清單合併」建立穩定交易日列表
+2. 自動判斷是否為交易日
+3. 抓取上市、上櫃成交金額與漲跌幅資訊
+4. 過濾「00」開頭證券代號
+5. 雙層欄位完整性檢查（核心 + 漲跌幅）
+"""
+
 import requests
 from io import StringIO
 import pandas as pd
 import urllib3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 urllib3.disable_warnings()
 
-# 日期轉換函數
-def convert_date_format(date_str):
-    """YYYYMMDD → YYYY/MM/DD"""
-    return f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}"
-
-# 交易日計算
+# === 🧭 1. 使用台積電月成交資料判斷交易日 ===
 def get_month_trading_dates(year_month_str):
-    """取得指定月份的所有交易日"""
-    if len(year_month_str) == 6:
-        query_date = year_month_str + '01'
+    if len(year_month_str) == 8:
+        query_date = year_month_str[:6] + "01"
     else:
         query_date = year_month_str
-    
-    url = f'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={query_date}&stockNo=2330&response=json'
-    
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={query_date}&stockNo=2330&response=json"
+    trading_dates = []
     try:
         response = requests.get(url, timeout=10, verify=False)
         data = response.json()
-        
-        if data.get('stat') != 'OK':
+        if data.get("stat") != "OK" or "data" not in data:
             return []
-        
-        trading_dates = []
-        for row in data.get('data', []):
-            date_str = row[0]
-            year, month, day = date_str.split('/')
-            year = int(year) + 1911
-            trading_date = f"{year}{month.zfill(2)}{day.zfill(2)}"
-            trading_dates.append(trading_date)
-        
+        for row in data["data"]:
+            try:
+                roc_year, month, day = row[0].split("/")
+                year = int(roc_year) + 1911
+                trading_dates.append(f"{year}{month.zfill(2)}{day.zfill(2)}")
+            except Exception:
+                continue
         return sorted(trading_dates, reverse=True)
-    except:
+    except Exception as e:
+        print(f"[get_month_trading_dates] 抓取失敗：{e}")
         return []
 
+# === 🧮 2. 以每月交易日清單合併建立 250 日清單 ===
 def build_trading_dates_list(target_date_str, required_days=250):
-    """建立交易日清單"""
-    target_date = datetime.strptime(target_date_str, '%Y%m%d')
+    target_date = datetime.strptime(target_date_str, "%Y%m%d")
     all_trading_dates = []
     current_date = target_date
-    month_count = 0
-    max_months = 15
-    
-    while len(all_trading_dates) < required_days and month_count < max_months:
-        year_month = current_date.strftime('%Y%m')
-        month_dates = get_month_trading_dates(year_month)
-        
+    max_months = 18
+    while len(all_trading_dates) < required_days and max_months > 0:
+        ym = current_date.strftime("%Y%m")
+        month_dates = get_month_trading_dates(ym)
         if month_dates:
-            valid_dates = [d for d in month_dates if d <= target_date_str]
-            all_trading_dates.extend(valid_dates)
-        
+            valid = [d for d in month_dates if d <= target_date_str]
+            all_trading_dates.extend(valid)
         if current_date.month == 1:
             current_date = current_date.replace(year=current_date.year - 1, month=12)
         else:
             current_date = current_date.replace(month=current_date.month - 1)
-        
-        month_count += 1
+        max_months -= 1
         time.sleep(0.3)
-    
-    return sorted(list(set(all_trading_dates)), reverse=True)
+    all_trading_dates = sorted(list(set(all_trading_dates)), reverse=True)
+    return all_trading_dates[:required_days]
 
+# === 📅 3. 計算各期間日期 ===
 def get_period_dates(trading_dates_list, target_date_str):
-    """計算各期間日期"""
     if target_date_str not in trading_dates_list:
         raise ValueError(f"{target_date_str} 不是交易日!")
-    
-    target_index = trading_dates_list.index(target_date_str)
-    periods = [1, 5, 10, 20, 60, 120, 240]
-    result = {'今日': target_date_str}
-    
-    for period in periods:
-        past_index = target_index + period
-        if past_index < len(trading_dates_list):
-            result[f'{period}日前'] = trading_dates_list[past_index]
-        else:
-            result[f'{period}日前'] = None
-    
+    idx = trading_dates_list.index(target_date_str)
+    result = {"今日": target_date_str}
+    for p in [1,5,10,20,60,120,240]:
+        i = idx + p
+        result[f"{p}日前"] = trading_dates_list[i] if i < len(trading_dates_list) else None
     return result
 
-# 資料抓取
+# === 💹 4. 取得上市資料 ===
 def get_twse_data(date):
-    """上市資料"""
-    url = f'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date}&type=ALLBUT0999&response=csv'
-    
-    try:
-        response = requests.get(url, timeout=10, verify=False)
-    except:
-        response = requests.get(url, verify=False, timeout=10)
-    
-    lines = response.text.split('\n')
-    valid_lines = [line for line in lines if len(line.split('",')) == 17]
-    data_text = "\n".join(valid_lines).replace('=', '')
-    
+    url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date}&type=ALLBUT0999&response=csv"
+    res = requests.get(url, timeout=10, verify=False)
+    lines = res.text.split("\n")
+    valid = [l for l in lines if len(l.split('",')) == 17]
+    data_text = "\n".join(valid).replace("=", "")
     df = pd.read_csv(StringIO(data_text))
-    df = df.astype(str).apply(lambda s: s.str.replace(',', ''))
-    df = df.set_index('證券代號')
+    df = df.astype(str).apply(lambda s: s.str.replace(",", ""))
     df["成交金額"] = pd.to_numeric(df["成交金額"], errors="coerce")
     df["收盤價"] = pd.to_numeric(df["收盤價"], errors="coerce")
-    
-    result = df[["證券名稱", "成交金額", "收盤價"]].copy().reset_index()
-    result = result[~result['證券代號'].str.startswith('00')]
-    result['市場'] = '上市'
-    return result
+    df = df[["證券代號", "證券名稱", "成交金額", "收盤價"]].copy()
+    df["市場"] = "上市"
+    df = df[~df["證券代號"].astype(str).str.startswith("00")]
+    required_cols = ["證券代號","證券名稱","成交金額","收盤價","市場"]
+    for c in required_cols:
+        if c not in df.columns: df[c]=None
+    return df
 
+# === 💹 5. 取得上櫃資料 ===
 def get_otc_data(date):
-    """上櫃資料"""
-    formatted_date = convert_date_format(date)
-    url = f'https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={formatted_date}&type=EW&response=csv&order=8&sort=desc'
-    
-    try:
-        response = requests.get(url, timeout=10, verify=False)
-    except:
-        response = requests.get(url, verify=False, timeout=10)
-    
-    lines = response.text.split('\n')
-    valid_lines = [line for line in lines if len(line.split(',')) > 10]
-    data_text = "\n".join(valid_lines).replace('=', '')
-    
+    def fmt(d): return f"{d[:4]}/{d[4:6]}/{d[6:8]}"
+    res = requests.get(f"https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={fmt(date)}&type=EW&response=csv&order=8&sort=desc",timeout=10,verify=False)
+    lines = res.text.split("\n")
+    valid = [l for l in lines if len(l.split(","))>10]
+    data_text = "\n".join(valid).replace("=", "")
     df = pd.read_csv(StringIO(data_text))
-    df = df[df["代號"].astype(str).str.len() <= 4]
-    df = df.astype(str).apply(lambda s: s.str.replace(',', '').str.strip())
+    df = df[df["代號"].astype(str).str.len()<=4]
+    df = df.astype(str).apply(lambda s:s.str.replace(",", "").str.strip())
     df.columns = df.columns.str.strip()
-    
     df["成交金額(元)"] = pd.to_numeric(df["成交金額(元)"], errors="coerce")
     df["收盤"] = pd.to_numeric(df["收盤"], errors="coerce")
-    df = df[df["成交金額(元)"] != 0]
-    
-    result = df[["代號", "名稱", "成交金額(元)", "收盤"]].copy()
-    result.columns = ["證券代號", "證券名稱", "成交金額", "收盤價"]
-    result = result[~result['證券代號'].str.startswith('00')]
-    result['市場'] = '上櫃'
-    return result
+    df = df[df["成交金額(元)"]!=0]
+    df = df.rename(columns={"代號":"證券代號","名稱":"證券名稱","成交金額(元)":"成交金額","收盤":"收盤價"})
+    df["市場"]="上櫃"
+    df = df[~df["證券代號"].astype(str).str.startswith("00")]
+    required_cols = ["證券代號","證券名稱","成交金額","收盤價","市場"]
+    for c in required_cols:
+        if c not in df.columns: df[c]=None
+    return df
 
-# 多日資料整合
-def get_multi_date_data(dates_dict, market='twse'):
-    """取得多日資料並計算漲跌幅"""
-    fetch_func = get_twse_data if market == 'twse' else get_otc_data
-    all_data = {}
-    
-    for label, date_str in dates_dict.items():
-        if date_str is None:
-            continue
-        try:
-            df = fetch_func(date_str)
-            all_data[label] = df
-        except:
-            pass
+# === 📊 6. 整合資料 + 計算漲跌幅 ===
+def get_multi_date_data(dates_dict, market="twse"):
+    f = get_twse_data if market=="twse" else get_otc_data
+    all_data={}
+    for label,d in dates_dict.items():
+        if not d: continue
+        try: all_data[label]=f(d)
+        except: pass
         time.sleep(0.3)
-    
-    if '今日' not in all_data:
-        return pd.DataFrame()
-    
-    today_data = all_data['今日']
-    result = today_data[['證券代號', '證券名稱', '成交金額', '收盤價', '市場']].copy()
-    
-    for label in ['1日前', '5日前', '10日前', '20日前', '60日前', '120日前', '240日前']:
-        if label in all_data:
-            temp = all_data[label][['證券代號', '收盤價']].copy()
-            temp.columns = ['證券代號', f'{label}收盤價']
-            result = result.merge(temp, on='證券代號', how='left')
-    
-    for period in ['1日', '5日', '10日', '20日', '60日', '120日', '240日']:
-        col_name = f'{period}前收盤價'
-        if col_name in result.columns:
-            result[f'{period}漲跌幅'] = (
-                (result['收盤價'] - result[col_name]) / result[col_name] * 100
-            ).round(2)
-            result.drop(columns=[col_name], inplace=True)
-    
-    return result
+    if "今日" not in all_data: return pd.DataFrame()
+    res=all_data["今日"].copy()
+    for lb in ["1日前","5日前","10日前","20日前","60日前","120日前","240日前"]:
+        if lb in all_data:
+            t=all_data[lb][["證券代號","收盤價"]]
+            t.columns=["證券代號",f"{lb}收盤價"]
+            res=res.merge(t,on="證券代號",how="left")
+    for p in ["1日","5日","10日","20日","60日","120日","240日"]:
+        col=f"{p}前收盤價"
+        if col in res.columns:
+            res[f"{p}漲跌幅"]=((res["收盤價"]-res[col])/res[col]*100).round(2)
+            res.drop(columns=[col],inplace=True)
+    return res
 
-# 主函數
-def get_taiwan_stock_data(date, top_n=50, market='all'):
-    """
-    主函數 - 保持與原版相同的函數簽名
-    
-    回傳欄位:
-    證券代號, 證券名稱, 成交金額, 收盤價, 市場,
-    1日漲跌幅, 5日漲跌幅, 10日漲跌幅, 20日漲跌幅,
-    60日漲跌幅, 120日漲跌幅, 240日漲跌幅
-    """
-    trading_dates = build_trading_dates_list(date, required_days=250)
-    dates_dict = get_period_dates(trading_dates, date)
-    
-    if market in ['all', 'twse']:
-        twse_data = get_multi_date_data(dates_dict, market='twse')
-    else:
-        twse_data = pd.DataFrame()
-    
-    if market in ['all', 'otc']:
-        otc_data = get_multi_date_data(dates_dict, market='otc')
-    else:
-        otc_data = pd.DataFrame()
-    
-    combined = pd.concat([twse_data, otc_data], ignore_index=True)
-    result = combined.sort_values('成交金額', ascending=False).head(top_n)
-    
-    final_columns = [
-        "證券代號", "證券名稱", "成交金額", "收盤價", "市場",
-        "1日漲跌幅", "5日漲跌幅", "10日漲跌幅", "20日漲跌幅",
-        "60日漲跌幅", "120日漲跌幅", "240日漲跌幅"
-    ]
-    
-    for col in final_columns:
-        if col not in result.columns:
-            result[col] = None
-    
-    return result[final_columns]
+# === 🏦 7. 主函數 ===
+def get_taiwan_stock_data(date, top_n=50, market="all"):
+    td=build_trading_dates_list(date,250)
+    dd=get_period_dates(td,date)
+    twse=get_multi_date_data(dd,"twse") if market in ["all","twse"] else pd.DataFrame()
+    otc=get_multi_date_data(dd,"otc") if market in ["all","otc"] else pd.DataFrame()
+    combined=pd.concat([twse,otc],ignore_index=True)
+    core=["證券代號","證券名稱","成交金額","收盤價","市場"]
+    for c in core:
+        if c not in combined.columns: combined[c]=None
+    drift=["1日漲跌幅","5日漲跌幅","10日漲跌幅","20日漲跌幅","60日漲跌幅","120日漲跌幅","240日漲跌幅"]
+    for c in drift:
+        if c not in combined.columns: combined[c]=None
+    return combined.sort_values("成交金額",ascending=False).head(top_n)
+
+# === 🔁 8. 找出最近可用交易日 ===
+def find_latest_available_date(market="all",top_n=50,max_lookback=10):
+    today=datetime.today()
+    for i in range(max_lookback):
+        d=(today-timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            df=get_taiwan_stock_data(d,top_n,market)
+            if not df.empty: return df,d
+        except Exception as e:
+            print(f"[find_latest_available_date] {d} 無資料：{e}")
+            continue
+    raise ValueError("找不到可用的交易資料")
