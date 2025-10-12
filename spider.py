@@ -33,8 +33,12 @@ def get_month_trading_dates(year_month_str):
     這個函數「不會」在啟動時執行,只有當使用者呼叫API時才會啟動。
     透過台積電(2330)的月交易資料來判斷哪些日期是交易日。
     """
-    if len(year_month_str) == 8:
-        query_date = year_month_str[:6] + "01"
+
+        # 修改為
+    if len(year_month_str) == 6:
+        query_date = year_month_str + "01"  # 202510 → 20251001
+    elif len(year_month_str) == 8:
+        query_date = year_month_str[:6] + "01"  # 20251012 → 20251001
     else:
         query_date = year_month_str
     
