@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
+
 """
 spider_optimized_v4.py — 台股成交值排行榜爬蟲模組（極簡啟動版）
 
-版本：2025-10-12
+版本：2025-10-13 (Render優化版)
+
 特色：
 1. 啟動時「完全不執行」任何耗時操作
 2. 只提供健康檢查端點,保證Render快速啟動
 3. 所有複雜運算都在「使用者請求時」才執行
 4. 延遲初始化(Lazy Initialization)設計模式
+5. 增加User-Agent標頭,避免被證交所擋
 """
 
 import requests
@@ -23,7 +26,6 @@ urllib3.disable_warnings()
 TRADING_DATES_CACHE = None
 CACHE_DATE = None
 
-
 # ========== 1. 取得指定月份的所有交易日 ==========
 def get_month_trading_dates(year_month_str):
     """
@@ -33,8 +35,7 @@ def get_month_trading_dates(year_month_str):
     這個函數「不會」在啟動時執行,只有當使用者呼叫API時才會啟動。
     透過台積電(2330)的月交易資料來判斷哪些日期是交易日。
     """
-
-        # 修改為
+    # 確保查詢日期格式正確
     if len(year_month_str) == 6:
         query_date = year_month_str + "01"  # 202510 → 20251001
     elif len(year_month_str) == 8:
@@ -43,10 +44,16 @@ def get_month_trading_dates(year_month_str):
         query_date = year_month_str
     
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?date={query_date}&stockNo=2330&response=json"
+    
+    # ✅ 增加User-Agent標頭,避免被Render擋
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
     trading_dates = []
     
     try:
-        response = requests.get(url, timeout=10, verify=False)
+        response = requests.get(url, headers=headers, timeout=10, verify=False)
         data = response.json()
         
         if data.get("stat") != "OK" or "data" not in data:
@@ -75,7 +82,7 @@ def build_trading_dates_list(target_date_str, required_days=250):
     說明：
     這個函數「不會」在啟動時執行。
     只有當第一次呼叫get_taiwan_stock_data()時才會執行。
-    執行時會向證交所發送約18次請求,耗時約25秒。
+    執行時會向證交所發送約18次請求,耗時約30秒。
     """
     target_date = datetime.strptime(target_date_str, "%Y%m%d")
     all_trading_dates = []
@@ -99,7 +106,7 @@ def build_trading_dates_list(target_date_str, required_days=250):
             current_date = current_date.replace(month=current_date.month - 1)
         
         max_months -= 1
-        time.sleep(0.3)
+        time.sleep(1.5)  # ✅ 從0.3秒改成1.5秒,避免被證交所限流
     
     all_trading_dates = sorted(list(set(all_trading_dates)), reverse=True)
     print(f"[交易日清單] 完成! 共 {len(all_trading_dates[:required_days])} 個交易日")
@@ -132,7 +139,12 @@ def get_twse_data(date):
     """從證交所抓取上市股票資料"""
     url = f"https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?date={date}&type=ALLBUT0999&response=csv"
     
-    response = requests.get(url, timeout=10, verify=False)
+    # ✅ 增加User-Agent標頭
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
+    response = requests.get(url, headers=headers, timeout=10, verify=False)
     lines = response.text.split("\n")
     valid_lines = [line for line in lines if len(line.split('",')) == 17]
     data_text = "\n".join(valid_lines).replace("=", "")
@@ -141,7 +153,6 @@ def get_twse_data(date):
     df = df.astype(str).apply(lambda s: s.str.replace(",", ""))
     df["成交金額"] = pd.to_numeric(df["成交金額"], errors="coerce")
     df["收盤價"] = pd.to_numeric(df["收盤價"], errors="coerce")
-    
     df = df[["證券代號", "證券名稱", "成交金額", "收盤價"]].copy()
     df["市場"] = "上市"
     df = df[~df["證券代號"].astype(str).str.startswith("00")]
@@ -158,7 +169,12 @@ def get_otc_data(date):
     formatted_date = format_date(date)
     url = f"https://www.tpex.org.tw/www/zh-tw/afterTrading/otc?date={formatted_date}&type=EW&response=csv&order=8&sort=desc"
     
-    response = requests.get(url, timeout=10, verify=False)
+    # ✅ 增加User-Agent標頭
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
+    response = requests.get(url, headers=headers, timeout=10, verify=False)
     lines = response.text.split("\n")
     valid_lines = [line for line in lines if len(line.split(",")) > 10]
     data_text = "\n".join(valid_lines).replace("=", "")
@@ -167,7 +183,6 @@ def get_otc_data(date):
     df = df[df["代號"].astype(str).str.len() <= 4]
     df = df.astype(str).apply(lambda s: s.str.replace(",", "").str.strip())
     df.columns = df.columns.str.strip()
-    
     df["成交金額(元)"] = pd.to_numeric(df["成交金額(元)"], errors="coerce")
     df["收盤"] = pd.to_numeric(df["收盤"], errors="coerce")
     df = df[df["成交金額(元)"] != 0]
@@ -193,25 +208,29 @@ def get_multi_date_data(dates_dict, market="twse"):
     for label, date_str in dates_dict.items():
         if date_str is None:
             continue
+        
         try:
             all_data[label] = fetch_func(date_str)
             print(f"[資料抓取] {market} {label} ({date_str}) 成功")
         except Exception as e:
             print(f"[資料抓取] {market} {label} ({date_str}) 失敗: {e}")
             pass
-        time.sleep(0.3)
+        
+        time.sleep(1.5)  # ✅ 從0.3秒改成1.5秒
     
     if "今日" not in all_data:
         return pd.DataFrame()
     
     result = all_data["今日"].copy()
     
+    # 合併歷史價格
     for label in ["1日前", "5日前", "10日前", "20日前", "60日前", "120日前", "240日前"]:
         if label in all_data:
             temp = all_data[label][["證券代號", "收盤價"]].copy()
             temp.columns = ["證券代號", f"{label}收盤價"]
             result = result.merge(temp, on="證券代號", how="left")
     
+    # 計算漲跌幅
     for period in ["1日", "5日", "10日", "20日", "60日", "120日", "240日"]:
         col_name = f"{period}前收盤價"
         if col_name in result.columns:
@@ -231,8 +250,8 @@ def get_taiwan_stock_data(date, top_n=50, market="all"):
     延遲初始化設計：
     - 啟動時此函數「不會被呼叫」
     - 只有當N8N發送請求時才會執行
-    - 第一次執行會建立交易日快取(耗時25秒)
-    - 後續相同日期的查詢會使用快取(耗時3秒)
+    - 第一次執行會建立交易日快取(耗時30秒)
+    - 後續相同日期的查詢會使用快取(耗時5秒)
     
     輸入參數：
     - date: 查詢日期,格式 "YYYYMMDD"
@@ -241,8 +260,8 @@ def get_taiwan_stock_data(date, top_n=50, market="all"):
     
     回傳結果：
     - DataFrame,包含證券代號、名稱、成交金額、收盤價、市場、
-              1日漲跌幅、5日漲跌幅、10日漲跌幅、20日漲跌幅、
-              60日漲跌幅、120日漲跌幅、240日漲跌幅
+      1日漲跌幅、5日漲跌幅、10日漲跌幅、20日漲跌幅、
+      60日漲跌幅、120日漲跌幅、240日漲跌幅
     """
     global TRADING_DATES_CACHE, CACHE_DATE
     
@@ -254,19 +273,23 @@ def get_taiwan_stock_data(date, top_n=50, market="all"):
     # 延遲初始化:只有在需要時才建立快取
     if TRADING_DATES_CACHE is None or CACHE_DATE != date:
         print("[主函數] 快取不存在,開始建立交易日清單...")
-        print("[主函數] 這個步驟需要約25秒,請稍候...\n")
+        print("[主函數] 這個步驟需要約30秒,請稍候...\n")
+        
         TRADING_DATES_CACHE = build_trading_dates_list(date, required_days=250)
         CACHE_DATE = date
+        
         print(f"\n[主函數] 快取建立完成,共 {len(TRADING_DATES_CACHE)} 個交易日\n")
     else:
         print(f"[主函數] 使用已建立的快取({len(TRADING_DATES_CACHE)} 個交易日)\n")
     
+    # 計算各期間日期
     dates_dict = get_period_dates(TRADING_DATES_CACHE, date)
     print(f"[主函數] 期間日期:")
     for label, d in dates_dict.items():
         print(f"  {label}: {d}")
     print()
     
+    # 抓取上市資料
     if market in ["all", "twse"]:
         print("[主函數] 開始抓取上市資料...")
         twse_data = get_multi_date_data(dates_dict, market="twse")
@@ -274,6 +297,7 @@ def get_taiwan_stock_data(date, top_n=50, market="all"):
     else:
         twse_data = pd.DataFrame()
     
+    # 抓取上櫃資料
     if market in ["all", "otc"]:
         print("[主函數] 開始抓取上櫃資料...")
         otc_data = get_multi_date_data(dates_dict, market="otc")
@@ -281,16 +305,19 @@ def get_taiwan_stock_data(date, top_n=50, market="all"):
     else:
         otc_data = pd.DataFrame()
     
+    # 合併資料
     combined = pd.concat([twse_data, otc_data], ignore_index=True)
     
+    # 確保欄位完整
     core_cols = ["證券代號", "證券名稱", "成交金額", "收盤價", "市場"]
-    drift_cols = ["1日漲跌幅", "5日漲跌幅", "10日漲跌幅", "20日漲跌幅", 
+    drift_cols = ["1日漲跌幅", "5日漲跌幅", "10日漲跌幅", "20日漲跌幅",
                   "60日漲跌幅", "120日漲跌幅", "240日漲跌幅"]
     
     for col in core_cols + drift_cols:
         if col not in combined.columns:
             combined[col] = None
     
+    # 排序並取前N名
     result = combined.sort_values("成交金額", ascending=False).head(top_n)
     
     print(f"[主函數] 執行完成! 回傳 Top {top_n} 股票")
@@ -309,7 +336,6 @@ def find_latest_available_date(market="all", top_n=50, max_lookback=10):
     適用於不確定今天是否為交易日的情況。
     """
     today = datetime.today()
-    
     print(f"[自動尋找] 開始尋找最近可用交易日...")
     
     for i in range(max_lookback):
@@ -349,7 +375,6 @@ def health_check():
     }
 
 
-
 # ========== 10. 測試程式碼(僅本地執行) ==========
 if __name__ == "__main__":
     """
@@ -357,7 +382,7 @@ if __name__ == "__main__":
     
     重要：
     這段程式碼「不會」在Render部署時執行。
-    只有在本地用 python spider_optimized_v4.py 執行時才會跑。
+    只有在本地用 python spider.py 執行時才會跑。
     """
     print("\n" + "="*60)
     print("本地測試模式")
