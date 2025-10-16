@@ -14,5 +14,5 @@
 
 點擊下方按鈕即可自動部署：
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/render-examples/taiwan-stock-top50-api)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/wasdxwasd/taiwan-stock-top50-api)
 
